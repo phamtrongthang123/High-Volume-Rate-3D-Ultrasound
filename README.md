@@ -1,4 +1,4 @@
-# High Volume Rate 3D Ultrasound Reconstruction with Diffusion Models
+# (Unofficial) High Volume Rate 3D Ultrasound Reconstruction with Diffusion Models
 
 Reproducing the paper's pipeline using the [ZEA toolbox](https://github.com/zeahub/zea). This demo uses a pretrained 2D cardiac echo diffusion model and the CAMUS dataset to demonstrate the full algorithm: DPS-based interpolation of missing elevation planes, TV smoothness regularization, and SeqDiff temporal acceleration.
 

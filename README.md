@@ -10,6 +10,7 @@ All runnable code is at the repository root.
 pip install -r requirements.txt
 bash run_setup_env.sh      # installs zea, downloads data, verifies GPU
 bash run_reconstruct.sh    # runs the full pipeline
+bash run_sweep.sh          # multi-rate sweep: r ∈ {2, 3, 4, 6, 10}
 ```
 
 ### File structure
@@ -66,6 +67,8 @@ SeqDiff speedup demo     Metrics + visualization
 | `03_reconstruct_volume.py` | Reconstructs missing planes via DPS + data consistency + TV (axial + elevation), saves `outputs/reconstructed_volume.npy` |
 | `04_seqdiff_temporal.py` | Compares cold-start (200 steps) vs warm-start (50 steps), saves `outputs/04_seqdiff_comparison.png` |
 | `05_evaluate.py` | Computes PSNR/SSIM/LPIPS, saves `outputs/05_evaluation.png` and `outputs/05_elevation_profile.png` |
+| `09_sweep_summary.py` | Reads `outputs/r*/metrics.json`, produces comparison table, CSV, and figure |
+| `run_sweep.sh` | Runs reconstruction + evaluation for r ∈ {2, 3, 4, 6, 10}, then summary |
 
 ## Outputs
 
@@ -77,6 +80,9 @@ All outputs go to `outputs/`. Key files:
 - `04_seqdiff_comparison.png` — cold vs warm-start comparison
 - `05_evaluation.png` — GT / reconstruction / difference side-by-side
 - `05_elevation_profile.png` — inter-plane smoothness plot
+- `r{2,3,4,6,10}/` — per-rate sweep outputs (from `run_sweep.sh`)
+- `09_sweep_summary.png` — metrics vs acceleration rate with paper comparison
+- `09_sweep_summary.csv` — sweep results as CSV
 
 ## Results
 

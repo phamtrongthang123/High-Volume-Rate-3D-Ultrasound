@@ -44,6 +44,7 @@ error (matching the original DPS codebase). This introduces an implicit
 includes this normalization explicitly: γ · P(M) / ||M||₂.
 """
 
+import argparse
 import os
 
 import env_setup  # noqa: F401 — must be first
@@ -53,8 +54,14 @@ import numpy as np
 from zea import init_device
 from zea.models.diffusion import DiffusionModel
 
+# --- CLI args (backward-compatible defaults) ---
+_parser = argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--accel-rate", type=int, default=4)
+_parser.add_argument("--output-dir", type=str, default=None)
+_args, _ = _parser.parse_known_args()
+
 # --- Config ---
-ACCEL_RATE = 4  # r ≥ 1, acceleration rate (Eq. 5, eq:inverse-problem)
+ACCEL_RATE = _args.accel_rate  # r ≥ 1, acceleration rate (Eq. 5, eq:inverse-problem)
 N_STEPS = 200  # T, diffusion steps (Algo 1 line 25)
 GAMMA = 15.0  # γ, guidance strength (5 too weak: M_norm still 7.8 at step 200; 35 caused instability)
 ZETA = 0.001  # ζ, azimuth TV smoothness strength (Algo 1 line 36)
@@ -62,7 +69,9 @@ ZETA_EL = 0.003  # ζ_el, elevation TV smoothness strength (within B-planes)
 BATCH_SIZE = 16  # Batch B-planes through model for memory
 USE_SEQDIFF = False  # Enable SeqDiff warm-start from previous reconstruction
 SEQDIFF_TAU = 50  # τ', warm-start diffusion step (Algo 1 line 11, 19)
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
+BASE_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
+OUTPUT_DIR = _args.output_dir or BASE_OUTPUT_DIR
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # --- Init device ---
 init_device(verbose=False)
@@ -75,7 +84,7 @@ H, W = img_shape[0], img_shape[1]
 print(f"Model loaded. Input shape: {img_shape}")
 
 # --- Load pseudo-volume ---
-volume_path = os.path.join(OUTPUT_DIR, "pseudo_volume.npy")
+volume_path = os.path.join(BASE_OUTPUT_DIR, "pseudo_volume.npy")
 X_gt = np.load(volume_path)
 N_el, N_az, N_ax, C = X_gt.shape
 print(f"Loaded ground truth volume: {X_gt.shape}")
@@ -155,7 +164,7 @@ def one_diffusion_step(
     # sinusoidal embedding actually receives.
     def eps_theta(x):
         # need this to ensure broadcast correctly
-        sigma_2 = jnp.full((BATCH_SIZE, 1, 1, 1), sigma_tau**2, dtype=x.dtype)
+        sigma_2 = jnp.full((x.shape[0], 1, 1, 1), sigma_tau**2, dtype=x.dtype)
         return model.ema_network([x, sigma_2], training=False)
 
     epsilon, vjp_fn = jax.vjp(eps_theta, x_tau)
@@ -278,7 +287,7 @@ alphas = np.array(alphas)
 sigmas = np.array(sigmas)
 
 # --- SeqDiff initialization (Algo 1 lines 16-23) ---
-prev_recon_path = os.path.join(OUTPUT_DIR, "reconstructed_volume.npy")
+prev_recon_path = os.path.join(BASE_OUTPUT_DIR, "reconstructed_volume.npy")
 
 if USE_SEQDIFF and os.path.exists(prev_recon_path):
     # SeqDiff warm-start (Algo 1 lines 17-19)

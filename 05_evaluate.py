@@ -12,6 +12,8 @@ acceleration rates r ∈ {2, 3, 6, 10} (Section IV, Figures 5-7).
 
 import env_setup  # noqa: F401 — must be first
 
+import argparse
+import json
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,9 +22,17 @@ from zea import init_device
 from zea.metrics import Metrics
 from zea.ops import Pipeline, ScanConvert
 
+# --- CLI args (backward-compatible defaults) ---
+_parser = argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--accel-rate", type=int, default=4)
+_parser.add_argument("--output-dir", type=str, default=None)
+_parser.add_argument("--json-output", type=str, default=None)
+_args, _ = _parser.parse_known_args()
+
 # --- Config ---
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
-ACCEL_RATE = 4
+BASE_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
+OUTPUT_DIR = _args.output_dir or BASE_OUTPUT_DIR
+ACCEL_RATE = _args.accel_rate
 N_DISPLAY = 4  # Number of planes to display
 
 # --- Init device ---
@@ -30,8 +40,9 @@ init_device(verbose=False)
 
 # --- Load data ---
 print("Loading volumes...")
-volume_gt = np.load(os.path.join(OUTPUT_DIR, "pseudo_volume.npy"))
+volume_gt = np.load(os.path.join(BASE_OUTPUT_DIR, "pseudo_volume.npy"))
 volume_recon = np.load(os.path.join(OUTPUT_DIR, "reconstructed_volume.npy"))
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 print(f"GT shape: {volume_gt.shape}, Recon shape: {volume_recon.shape}")
 
 # --- Identify observed vs missing planes ---
@@ -52,6 +63,17 @@ results = metrics(gt_missing, recon_missing)
 
 for metric_name, value in results.items():
     print(f"  {metric_name}: {float(value):.4f}")
+
+# --- Save JSON metrics if requested ---
+if _args.json_output:
+    json_data = {k: float(v) for k, v in results.items()}
+    json_data["accel_rate"] = ACCEL_RATE
+    json_dir = os.path.dirname(_args.json_output)
+    if json_dir:
+        os.makedirs(json_dir, exist_ok=True)
+    with open(_args.json_output, "w") as f:
+        json.dump(json_data, f, indent=2)
+    print(f"  Saved metrics JSON to {_args.json_output}")
 
 # --- Per-plane metrics ---
 print("\n=== Per-Plane Metrics ===")

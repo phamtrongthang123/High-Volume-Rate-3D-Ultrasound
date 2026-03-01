@@ -4,10 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(dirname "$(realpath "$0")")"
 SCRIPT_DIR="$ROOT_DIR"
 
-# Activate virtual environment if present (skip if using system/conda Python)
-if [ -f "$ROOT_DIR/.venv_zea/bin/activate" ]; then
-    source "$ROOT_DIR/.venv_zea/bin/activate"
-fi
+# Activate conda environment
+eval "$(conda shell.bash hook)"
+conda activate zea
 cd "$SCRIPT_DIR"
 export KERAS_BACKEND=jax
 export ZEA_CACHE_DIR="$SCRIPT_DIR/cache"

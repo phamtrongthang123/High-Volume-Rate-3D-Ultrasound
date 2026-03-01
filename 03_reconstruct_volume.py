@@ -56,7 +56,7 @@ from zea.models.diffusion import DiffusionModel
 # --- Config ---
 ACCEL_RATE = 4  # r ≥ 1, acceleration rate (Eq. 5, eq:inverse-problem)
 N_STEPS = 200  # T, diffusion steps (Algo 1 line 25)
-GAMMA = 35.0  # γ, guidance strength (Eq. 12, eq:dps-linear-4)
+GAMMA = 15.0  # γ, guidance strength (5 too weak: M_norm still 7.8 at step 200; 35 caused instability)
 ZETA = 0.001  # ζ, smoothness strength (Algo 1 line 36)
 BATCH_SIZE = 16  # Batch B-planes through model for memory
 USE_SEQDIFF = False  # Enable SeqDiff warm-start from previous reconstruction
@@ -343,6 +343,18 @@ for step in range(start_step, N_STEPS):
             debug=do_debug and is_first_batch,
         )
 
+    # --- Data consistency: replace observed rows with noised GT ---
+    # x_{τ-1}[observed] = α_{τ-1} · x_clean + σ_{τ-1} · ε
+    # Ensures observed rows stay faithful to measurements at every step.
+    a_next = float(np.array(alpha_tau_minus_1).ravel()[0])
+    s_next = float(np.array(sigma_tau_minus_1).ravel()[0])
+    noise_dc = np.random.randn(
+        N_az, len(observed_rows), N_ax, C
+    ).astype(np.float32)
+    x_tau_minus_1[:, observed_rows, :, :] = (
+        a_next * B_gt[:, observed_rows, :, :] + s_next * noise_dc
+    )
+
     # --- Stack B-planes into volume X_{τ-1} (Algo 1 line 34) ---
     # Transpose from (N_az, N_el, N_ax, C) → (N_el, N_az, N_ax, C)
     X_tau_minus_1 = np.transpose(x_tau_minus_1, (1, 0, 2, 3))
@@ -350,8 +362,8 @@ for step in range(start_step, N_STEPS):
     # --- TV regularization (Algo 1 lines 35-36) ---
     # V ← ∇_X TV_az(X_{τ-1})
     # X_{τ-1} ← X_{τ-1} - α_{τ-1} ζ V
-    # V = compute_tv_gradient_azimuth(X_tau_minus_1)
-    # X_tau_minus_1 = X_tau_minus_1 - alpha_tau_minus_1 * ZETA * V
+    V = compute_tv_gradient_azimuth(X_tau_minus_1)
+    X_tau_minus_1 = X_tau_minus_1 - alpha_tau_minus_1 * ZETA * V
 
     # --- Back to B-planes for next step ---
     x_tau = np.transpose(X_tau_minus_1, (1, 0, 2, 3))

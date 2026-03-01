@@ -80,26 +80,19 @@ All outputs go to `outputs/`. Key files:
 
 ## Expected Metrics Behavior
 
-The CAMUS sample dataset only contains **2 unique images**. The pseudo-volume cycles them as (A, B, A, B, ...). With `ACCEL_RATE=4`, observed planes (0, 4, 8, ...) are all image A. This creates an adversarial scenario where DPS guidance only ever sees image A, but half the missing planes are image B (a completely different patient).
+`02_prepare_pseudo_volume.py` loads two **consecutive temporal frames** from the 4CH cardiac sequence (frame 0 → t1, frame 1 → t2). Adjacent frames share strong structural similarity — the anatomy changes only slightly between heartbeats — which satisfies SeqDiff's core assumption that consecutive volumes are similar enough to warm-start from the previous reconstruction.
+
+The step 03 ground truth (`pseudo_volume.npy`) uses frame 0 uniformly tiled across all elevation planes. The reconstruction task and metrics are therefore:
 
 **Observed results** (N_STEPS=200, OMEGA=35, ZETA=0.001):
 
 | Metric | Overall (missing planes) |
 |--------|--------------------------|
-| PSNR   | ~13.0 dB                 |
-| SSIM   | ~0.12                    |
-| LPIPS  | ~0.37                    |
+| PSNR   | ~14.6 dB                 |
+| SSIM   | ~0.22                    |
+| LPIPS  | ~0.39                    |
 
-Per-plane metrics show a clear bimodal pattern:
-
-| Missing plane type | Example planes | PSNR | SSIM | Why |
-|--------------------|---------------|------|------|-----|
-| Even midpoints (image A) | 2, 6, 10, 14, ... | ~15-16 dB | ~0.3 | Same content as observed planes; DPS + TV can partially reconstruct |
-| Odd planes (image B) | 1, 3, 5, 7, ... | ~11-12 dB | ~0.03 | Different patient image; no information available from observations |
-
-**These low scores are expected and do not indicate an algorithm bug.** The ~0.03 SSIM for odd planes simply measures how different two unrelated patient images are — no reconstruction method can recover image B from observations of image A alone.
-
-With real 3D ultrasound data (smooth, continuous variation along elevation), all missing planes would be similar to their observed neighbors, and scores should be substantially higher.
+These scores reflect the difficulty of reconstructing missing elevation planes from a pseudo-volume built from a single 2D image tiled uniformly — not a real 3D dataset. With real 3D ultrasound data (smooth, continuous variation along elevation), scores should be substantially higher.
 
 ## Known Limitations
 

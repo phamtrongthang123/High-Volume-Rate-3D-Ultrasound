@@ -86,15 +86,17 @@ All outputs go to `outputs/`. Key files:
 
 ## Results
 
-### Our reproduction (CETUS patient01, r=4)
+### Multi-rate sweep (CETUS patient01)
 
-| Metric | Value |
-|--------|-------|
-| PSNR   | 23.06 dB |
-| SSIM   | 0.32     |
-| LPIPS  | 0.445    |
+| r  | PSNR (dB) | SSIM   | LPIPS  |
+|----|-----------|--------|--------|
+| 2  | 23.48     | 0.3587 | 0.4198 |
+| 3  | 23.27     | 0.3300 | 0.4373 |
+| 4  | 23.05     | 0.3158 | 0.4462 |
+| 6  | 22.67     | 0.2981 | 0.4530 |
+| 10 | 21.95     | 0.2730 | 0.4668 |
 
-Parameters: `N_STEPS=200, GAMMA=15.0, ZETA=0.001, ZETA_EL=0.003, ACCEL_RATE=4`
+Parameters: `N_STEPS=200, GAMMA=15.0, ZETA=0.001, ZETA_EL=0.003`
 
 ### Paper's reported results (approximate, read from figures)
 
@@ -118,7 +120,7 @@ Parameters: `N_STEPS=200, GAMMA=15.0, ZETA=0.001, ZETA_EL=0.003, ACCEL_RATE=4`
 
 ### Comparison notes
 
-Our PSNR of 23.1 dB at r=4 is comparable to the paper's ~23.5 dB at r=6, which is a harder setting. The key differences:
+Our PSNR ranges from 23.5 dB (r=2) to 22.0 dB (r=10). At r=6, our 22.7 dB vs. the paper's ~23.5 dB reflects the domain gap. Key differences:
 
 - **Paper**: proprietary 3D cardiac echo data with a diffusion prior trained on matching B-plane data
 - **Ours**: CETUS (public 3D echo, different acquisition characteristics) with EchoNet-Dynamic prior (trained on 2D apical 4-chamber views from a different dataset)

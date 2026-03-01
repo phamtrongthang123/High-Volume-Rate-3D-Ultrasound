@@ -60,8 +60,9 @@ python 05_evaluate.py
 | Diffusion steps | `N_STEPS` | 200 | 50 for quick testing |
 | Observed elevation planes | `N_ELEVATION` | 16 | 8 for quick testing |
 | Acceleration rate | `ACCEL_RATE` | 4 | observe every 4th plane |
-| DPS guidance strength | `GAMMA` (Ω) | 35.0 | |
-| TV smoothness strength | `ZETA` (ζ) | 0.001 | |
+| DPS guidance strength | `GAMMA` (Ω) | 35.0 | Currently using 15.0 for best results |
+| TV smoothness strength | `ZETA` (ζ) | 0.001 | Axial TV within each B-plane |
+| Elevation TV strength | `ZETA_EL` | 0.003 | TV across elevation planes |
 | SeqDiff warm-start step | `SEQDIFF_TAU` (τ') | 50 | |
 
 ## Environment
@@ -81,6 +82,12 @@ All outputs written to `outputs/`:
 - `05_evaluation.png` — GT | Reconstruction | Difference
 - `05_elevation_profile.png` — elevation coherence profile
 
-## Expected Metrics (CETUS volumes)
+## Expected Metrics (CETUS patient01, r=4)
 
-Metrics will differ from the pseudo-volume baseline now that B-planes have real anatomical variation. Previous pseudo-volume baseline: PSNR ~14.6 dB, SSIM ~0.22, LPIPS ~0.39.
+| Metric | Our result | Paper at r=6 |
+|--------|-----------|--------------|
+| PSNR   | ~23.1 dB  | ~23.5 dB     |
+| SSIM   | ~0.32     | —            |
+| LPIPS  | ~0.45     | ~0.16 (B-plane) |
+
+Our PSNR is comparable to the paper's at r=6 despite the domain gap (EchoNet-Dynamic 2D A4C prior vs. paper's matched 3D echo prior). LPIPS is higher due to this domain gap.

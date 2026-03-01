@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import List, Union
 
@@ -39,7 +40,7 @@ from diffusers import (
 from diffusers.optimization import get_scheduler
 from diffusers.utils import is_wandb_available
 from packaging import version
-from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
+from peft import LoraConfig, get_peft_model
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import T5EncoderModel, T5Tokenizer
@@ -47,175 +48,87 @@ from transformers import T5EncoderModel, T5Tokenizer
 logger = get_logger(__name__, log_level="INFO")
 
 
+def _unwrap(model):
+    """Extract underlying model from DDP/accelerate wrappers (avoids deepspeed import)."""
+    m = model
+    while hasattr(m, "module"):
+        m = m.module
+    return m
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="LoRA fine-tuning of PixArt-α on CETUS B-planes."
     )
     parser.add_argument(
-        "--pretrained_model_name_or_path",
-        type=str,
-        required=True,
+        "--pretrained_model_name_or_path", type=str, required=True,
         help="Path to pretrained PixArt-α model or HuggingFace model id.",
     )
-    parser.add_argument(
-        "--revision", type=str, default=None,
-        help="Revision of pretrained model.",
-    )
-    parser.add_argument(
-        "--variant", type=str, default=None,
-        help="Variant of the model files (e.g. fp16).",
-    )
-    parser.add_argument(
-        "--dataset_name", type=str, default=None,
-        help="Path to dataset directory (ImageFolder format with metadata.csv).",
-    )
-    parser.add_argument(
-        "--dataset_config_name", type=str, default=None,
-    )
-    parser.add_argument(
-        "--train_data_dir", type=str, default=None,
-        help="Training data directory (alternative to --dataset_name).",
-    )
-    parser.add_argument(
-        "--image_column", type=str, default="image",
-    )
-    parser.add_argument(
-        "--caption_column", type=str, default="text",
-    )
+    parser.add_argument("--revision", type=str, default=None)
+    parser.add_argument("--variant", type=str, default=None)
+    parser.add_argument("--dataset_name", type=str, default=None)
+    parser.add_argument("--dataset_config_name", type=str, default=None)
+    parser.add_argument("--train_data_dir", type=str, default=None)
+    parser.add_argument("--image_column", type=str, default="image")
+    parser.add_argument("--caption_column", type=str, default="text")
     parser.add_argument(
         "--validation_prompt", type=str,
         default="a cardiac ultrasound b-plane image",
     )
-    parser.add_argument(
-        "--num_validation_images", type=int, default=4,
-    )
-    parser.add_argument(
-        "--validation_epochs", type=int, default=5,
-    )
-    parser.add_argument(
-        "--max_train_samples", type=int, default=None,
-    )
+    parser.add_argument("--num_validation_images", type=int, default=4)
+    parser.add_argument("--validation_epochs", type=int, default=5)
+    parser.add_argument("--max_train_samples", type=int, default=None)
     parser.add_argument(
         "--output_dir", type=str, default="training/checkpoints/cetus_pixart_lora",
     )
+    parser.add_argument("--cache_dir", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--resolution", type=int, default=512)
+    parser.add_argument("--center_crop", default=False, action="store_true")
+    parser.add_argument("--random_flip", action="store_true")
+    parser.add_argument("--train_batch_size", type=int, default=4)
+    parser.add_argument("--num_train_epochs", type=int, default=50)
+    parser.add_argument("--max_train_steps", type=int, default=None)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--gradient_checkpointing", action="store_true")
+    parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--scale_lr", action="store_true", default=False)
+    parser.add_argument("--lr_scheduler", type=str, default="cosine")
+    parser.add_argument("--lr_warmup_steps", type=int, default=100)
+    parser.add_argument("--snr_gamma", type=float, default=None)
+    parser.add_argument("--use_8bit_adam", action="store_true")
+    parser.add_argument("--allow_tf32", action="store_true")
+    parser.add_argument("--dataloader_num_workers", type=int, default=0)
+    parser.add_argument("--adam_beta1", type=float, default=0.9)
+    parser.add_argument("--adam_beta2", type=float, default=0.999)
+    parser.add_argument("--adam_weight_decay", type=float, default=1e-2)
+    parser.add_argument("--adam_epsilon", type=float, default=1e-08)
+    parser.add_argument("--max_grad_norm", default=1.0, type=float)
+    parser.add_argument("--proportion_empty_prompts", type=float, default=0)
+    parser.add_argument("--prediction_type", type=str, default=None)
+    parser.add_argument("--logging_dir", type=str, default="logs")
     parser.add_argument(
-        "--cache_dir", type=str, default=None,
+        "--mixed_precision", type=str, default=None, choices=["no", "fp16", "bf16"],
     )
-    parser.add_argument(
-        "--seed", type=int, default=42,
-    )
-    parser.add_argument(
-        "--resolution", type=int, default=512,
-    )
-    parser.add_argument(
-        "--center_crop", default=False, action="store_true",
-    )
-    parser.add_argument(
-        "--random_flip", action="store_true",
-    )
-    parser.add_argument(
-        "--train_batch_size", type=int, default=4,
-    )
-    parser.add_argument(
-        "--num_train_epochs", type=int, default=50,
-    )
-    parser.add_argument(
-        "--max_train_steps", type=int, default=None,
-    )
-    parser.add_argument(
-        "--gradient_accumulation_steps", type=int, default=1,
-    )
-    parser.add_argument(
-        "--gradient_checkpointing", action="store_true",
-    )
-    parser.add_argument(
-        "--learning_rate", type=float, default=1e-4,
-    )
-    parser.add_argument(
-        "--scale_lr", action="store_true", default=False,
-    )
-    parser.add_argument(
-        "--lr_scheduler", type=str, default="cosine",
-    )
-    parser.add_argument(
-        "--lr_warmup_steps", type=int, default=100,
-    )
-    parser.add_argument(
-        "--snr_gamma", type=float, default=None,
-    )
-    parser.add_argument(
-        "--use_8bit_adam", action="store_true",
-    )
-    parser.add_argument(
-        "--allow_tf32", action="store_true",
-    )
-    parser.add_argument(
-        "--dataloader_num_workers", type=int, default=0,
-    )
-    parser.add_argument(
-        "--adam_beta1", type=float, default=0.9,
-    )
-    parser.add_argument(
-        "--adam_beta2", type=float, default=0.999,
-    )
-    parser.add_argument(
-        "--adam_weight_decay", type=float, default=1e-2,
-    )
-    parser.add_argument(
-        "--adam_epsilon", type=float, default=1e-08,
-    )
-    parser.add_argument(
-        "--max_grad_norm", default=1.0, type=float,
-    )
-    parser.add_argument(
-        "--proportion_empty_prompts", type=float, default=0,
-    )
-    parser.add_argument(
-        "--prediction_type", type=str, default=None,
-    )
-    parser.add_argument(
-        "--logging_dir", type=str, default="logs",
-    )
-    parser.add_argument(
-        "--mixed_precision", type=str, default=None,
-        choices=["no", "fp16", "bf16"],
-    )
-    parser.add_argument(
-        "--report_to", type=str, default="tensorboard",
-    )
-    parser.add_argument(
-        "--local_rank", type=int, default=-1,
-    )
-    parser.add_argument(
-        "--checkpointing_steps", type=int, default=500,
-    )
-    parser.add_argument(
-        "--checkpointing_epochs", type=int, default=10,
-    )
-    parser.add_argument(
-        "--checkpoints_total_limit", type=int, default=5,
-    )
-    parser.add_argument(
-        "--resume_from_checkpoint", type=str, default=None,
-    )
-    parser.add_argument(
-        "--enable_xformers_memory_efficient_attention", action="store_true",
-    )
-    parser.add_argument(
-        "--noise_offset", type=float, default=0,
-    )
-    parser.add_argument(
-        "--rank", type=int, default=8,
-        help="LoRA rank.",
-    )
+    parser.add_argument("--report_to", type=str, default="tensorboard")
+    parser.add_argument("--local_rank", type=int, default=-1)
+    parser.add_argument("--checkpointing_steps", type=int, default=500)
+    parser.add_argument("--checkpointing_epochs", type=int, default=10)
+    parser.add_argument("--checkpoints_total_limit", type=int, default=5)
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None)
+    parser.add_argument("--enable_xformers_memory_efficient_attention", action="store_true")
+    parser.add_argument("--noise_offset", type=float, default=0)
+    parser.add_argument("--rank", type=int, default=8, help="LoRA rank.")
     parser.add_argument(
         "--train_text_encoder", action="store_true",
         help="Also train text encoder LoRA (disabled by default for fixed prompt).",
     )
-    parser.add_argument(
-        "--max_token_length", type=int, default=120,
-    )
+    parser.add_argument("--max_token_length", type=int, default=120)
     parser.add_argument("--local-rank", type=int, default=-1)
+    parser.add_argument(
+        "--val_data_dir", type=str, default=None,
+        help="Path to validation image folder (same format as train). If set, computes val_loss each epoch.",
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -271,7 +184,6 @@ def main():
 
     max_length = args.max_token_length
 
-    # Mixed precision weight dtype
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
@@ -280,39 +192,29 @@ def main():
 
     # Load scheduler, tokenizer, models
     noise_scheduler = DDPMScheduler.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="scheduler",
+        args.pretrained_model_name_or_path, subfolder="scheduler",
         torch_dtype=weight_dtype,
     )
     tokenizer = T5Tokenizer.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="tokenizer",
-        revision=args.revision,
-        torch_dtype=weight_dtype,
+        args.pretrained_model_name_or_path, subfolder="tokenizer",
+        revision=args.revision, torch_dtype=weight_dtype,
     )
-
     text_encoder = T5EncoderModel.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="text_encoder",
-        revision=args.revision,
-        torch_dtype=weight_dtype,
+        args.pretrained_model_name_or_path, subfolder="text_encoder",
+        revision=args.revision, torch_dtype=weight_dtype,
     )
     text_encoder.requires_grad_(False)
     text_encoder.to(accelerator.device)
 
     vae = AutoencoderKL.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="vae",
-        revision=args.revision,
-        variant=args.variant,
-        torch_dtype=weight_dtype,
+        args.pretrained_model_name_or_path, subfolder="vae",
+        revision=args.revision, variant=args.variant, torch_dtype=weight_dtype,
     )
     vae.requires_grad_(False)
     vae.to(accelerator.device)
 
     transformer = Transformer2DModel.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="transformer",
+        args.pretrained_model_name_or_path, subfolder="transformer",
         torch_dtype=weight_dtype,
     )
     transformer.requires_grad_(False)
@@ -332,11 +234,9 @@ def main():
     transformer.to(accelerator.device)
     transformer = get_peft_model(transformer, lora_config)
 
-    # Optionally train text encoder LoRA
     if args.train_text_encoder:
         text_encoder_lora_config = LoraConfig(
-            r=args.rank,
-            init_lora_weights="gaussian",
+            r=args.rank, init_lora_weights="gaussian",
             target_modules=["q", "k", "v", "o", "wi", "wo"],
         )
         text_encoder = get_peft_model(text_encoder, text_encoder_lora_config)
@@ -358,38 +258,35 @@ def main():
         cast_training_params(models_to_cast, dtype=torch.float32)
 
     transformer.print_trainable_parameters()
-    if args.train_text_encoder:
-        text_encoder.print_trainable_parameters()
 
     # Checkpoint save/load hooks
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
         def save_model_hook(models, weights, output_dir):
             if accelerator.is_main_process:
-                transformer_ = accelerator.unwrap_model(transformer)
-                lora_state = get_peft_model_state_dict(transformer_, adapter_name="default")
-                PixArtLoraSaveDir = os.path.join(output_dir, "transformer_lora")
-                transformer_.save_pretrained(PixArtLoraSaveDir)
-
+                transformer_ = _unwrap(transformer)
+                transformer_.save_pretrained(
+                    os.path.join(output_dir, "transformer_lora")
+                )
                 if args.train_text_encoder:
-                    text_encoder_ = accelerator.unwrap_model(text_encoder)
-                    te_lora_state = get_peft_model_state_dict(text_encoder_, adapter_name="default")
-                    text_encoder_.save_pretrained(os.path.join(output_dir, "text_encoder_lora"))
-
+                    text_encoder_ = _unwrap(text_encoder)
+                    text_encoder_.save_pretrained(
+                        os.path.join(output_dir, "text_encoder_lora")
+                    )
                 for _ in models:
                     weights.pop()
 
         def load_model_hook(models, input_dir):
-            transformer_ = accelerator.unwrap_model(transformer)
+            transformer_ = _unwrap(transformer)
             transformer_.load_adapter(
-                os.path.join(input_dir, "transformer_lora"), "default", is_trainable=True,
+                os.path.join(input_dir, "transformer_lora"), "default",
+                is_trainable=True,
             )
-
             if args.train_text_encoder:
-                text_encoder_ = accelerator.unwrap_model(text_encoder)
+                text_encoder_ = _unwrap(text_encoder)
                 text_encoder_.load_adapter(
-                    os.path.join(input_dir, "text_encoder_lora"), "default", is_trainable=True,
+                    os.path.join(input_dir, "text_encoder_lora"), "default",
+                    is_trainable=True,
                 )
-
             for _ in range(len(models)):
                 models.pop()
 
@@ -403,7 +300,6 @@ def main():
         else:
             raise ValueError("xformers is not available.")
 
-    # Collect trainable parameters
     lora_layers = list(filter(lambda p: p.requires_grad, transformer.parameters()))
     if args.train_text_encoder:
         lora_layers += list(filter(lambda p: p.requires_grad, text_encoder.parameters()))
@@ -422,7 +318,6 @@ def main():
             * accelerator.num_processes
         )
 
-    # Optimizer
     if args.use_8bit_adam:
         import bitsandbytes as bnb
         optimizer_cls = bnb.optim.AdamW8bit
@@ -440,19 +335,15 @@ def main():
     # Load dataset
     if args.dataset_name is not None:
         dataset = load_dataset(
-            args.dataset_name,
-            args.dataset_config_name,
-            cache_dir=args.cache_dir,
-            data_dir=args.train_data_dir,
+            args.dataset_name, args.dataset_config_name,
+            cache_dir=args.cache_dir, data_dir=args.train_data_dir,
         )
     else:
         data_files = {}
         if args.train_data_dir is not None:
             data_files["train"] = os.path.join(args.train_data_dir, "**")
         dataset = load_dataset(
-            "imagefolder",
-            data_files=data_files,
-            cache_dir=args.cache_dir,
+            "imagefolder", data_files=data_files, cache_dir=args.cache_dir,
         )
 
     column_names = dataset["train"].column_names
@@ -469,11 +360,8 @@ def main():
             else:
                 raise ValueError(f"Unexpected caption type: {type(caption)}")
         inputs = tokenizer(
-            captions,
-            max_length=max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
+            captions, max_length=max_length, padding="max_length",
+            truncation=True, return_tensors="pt",
         )
         return inputs.input_ids, inputs.attention_mask
 
@@ -525,14 +413,45 @@ def main():
         }
 
     train_dataloader = torch.utils.data.DataLoader(
-        train_dataset,
-        shuffle=True,
-        collate_fn=collate_fn,
+        train_dataset, shuffle=True, collate_fn=collate_fn,
         batch_size=args.train_batch_size,
         num_workers=args.dataloader_num_workers,
     )
 
-    # Scheduler
+    # Validation dataset (deterministic transforms: center crop, no flip)
+    val_dataloader = None
+    if args.val_data_dir is not None:
+        val_transforms = transforms.Compose([
+            transforms.Resize(
+                args.resolution, interpolation=transforms.InterpolationMode.BILINEAR
+            ),
+            transforms.CenterCrop(args.resolution),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5]),
+        ])
+
+        def preprocess_val(examples):
+            images = [image.convert("RGB") for image in examples[image_column]]
+            examples["pixel_values"] = [val_transforms(image) for image in images]
+            examples["text"] = examples[caption_column]
+            examples["input_ids"], examples["prompt_attention_mask"] = tokenize_captions(
+                examples, max_length=max_length,
+            )
+            return examples
+
+        with accelerator.main_process_first():
+            val_data_files = {"train": os.path.join(args.val_data_dir, "**")}
+            val_dataset_raw = load_dataset(
+                "imagefolder", data_files=val_data_files, cache_dir=args.cache_dir,
+            )
+            val_dataset = val_dataset_raw["train"].with_transform(preprocess_val)
+
+        val_dataloader = torch.utils.data.DataLoader(
+            val_dataset, shuffle=False, collate_fn=collate_fn,
+            batch_size=args.train_batch_size,
+            num_workers=args.dataloader_num_workers,
+        )
+
     overrode_max_train_steps = False
     num_update_steps_per_epoch = math.ceil(
         len(train_dataloader) / args.gradient_accumulation_steps
@@ -542,13 +461,11 @@ def main():
         overrode_max_train_steps = True
 
     lr_scheduler = get_scheduler(
-        args.lr_scheduler,
-        optimizer=optimizer,
+        args.lr_scheduler, optimizer=optimizer,
         num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
         num_training_steps=args.max_train_steps * accelerator.num_processes,
     )
 
-    # Prepare with accelerator
     models_to_prepare = [transformer, optimizer, train_dataloader, lr_scheduler]
     if args.train_text_encoder:
         models_to_prepare.insert(1, text_encoder)
@@ -560,7 +477,6 @@ def main():
             accelerator.prepare(*models_to_prepare)
         )
 
-    # Recalculate steps after prepare
     num_update_steps_per_epoch = math.ceil(
         len(train_dataloader) / args.gradient_accumulation_steps
     )
@@ -573,25 +489,21 @@ def main():
     if accelerator.is_main_process:
         accelerator.init_trackers("cetus-pixart-lora", config=vars(args))
 
-    # Training
     total_batch_size = (
-        args.train_batch_size
-        * accelerator.num_processes
+        args.train_batch_size * accelerator.num_processes
         * args.gradient_accumulation_steps
     )
-
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Batch size per device = {args.train_batch_size}")
     logger.info(f"  Total train batch size = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
 
     global_step = 0
     first_epoch = 0
+    best_val_loss = float("inf")
 
-    # Resume from checkpoint
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint != "latest":
             path = os.path.basename(args.resume_from_checkpoint)
@@ -603,7 +515,7 @@ def main():
 
         if path is None:
             accelerator.print(
-                f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting fresh."
+                f"Checkpoint '{args.resume_from_checkpoint}' not found. Starting fresh."
             )
             args.resume_from_checkpoint = None
             initial_global_step = 0
@@ -622,7 +534,6 @@ def main():
                 checkpoints = os.listdir(args.output_dir)
                 checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
                 checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
-
                 if len(checkpoints) >= args.checkpoints_total_limit:
                     num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
                     for ckpt in checkpoints[:num_to_remove]:
@@ -632,28 +543,20 @@ def main():
             save_path = os.path.join(args.output_dir, f"checkpoint-{step}")
             accelerator.save_state(save_path)
 
-            unwrapped_transformer = accelerator.unwrap_model(
-                transformer, keep_fp32_wrapper=False
-            )
+            unwrapped_transformer = _unwrap(transformer)
             unwrapped_transformer.save_pretrained(
                 os.path.join(save_path, "transformer_lora")
             )
-
             if args.train_text_encoder:
-                unwrapped_text_encoder = accelerator.unwrap_model(
-                    text_encoder, keep_fp32_wrapper=False
-                )
+                unwrapped_text_encoder = _unwrap(text_encoder)
                 unwrapped_text_encoder.save_pretrained(
                     os.path.join(save_path, "text_encoder_lora")
                 )
-
             logger.info(f"Saved state to {save_path}")
 
     progress_bar = tqdm(
-        range(0, args.max_train_steps),
-        initial=initial_global_step,
-        desc="Steps",
-        disable=not accelerator.is_local_main_process,
+        range(0, args.max_train_steps), initial=initial_global_step,
+        desc="Steps", disable=not accelerator.is_local_main_process,
     )
 
     for epoch in range(first_epoch, args.num_train_epochs):
@@ -661,16 +564,16 @@ def main():
         if args.train_text_encoder:
             text_encoder.train()
         train_loss = 0.0
+        epoch_train_loss = 0.0
+        epoch_train_steps = 0
 
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(transformer):
-                # Encode images to latent space
                 latents = vae.encode(
                     batch["pixel_values"].to(dtype=weight_dtype)
                 ).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
 
-                # Sample noise
                 noise = torch.randn_like(latents)
                 if args.noise_offset:
                     noise += args.noise_offset * torch.randn(
@@ -684,10 +587,8 @@ def main():
                     (bsz,), device=latents.device,
                 ).long()
 
-                # Forward diffusion
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-                # Text conditioning
                 if args.train_text_encoder:
                     prompt_embeds = text_encoder(
                         batch["input_ids"],
@@ -702,7 +603,6 @@ def main():
 
                 prompt_attention_mask = batch["prompt_attention_mask"]
 
-                # Target
                 if args.prediction_type is not None:
                     noise_scheduler.register_to_config(
                         prediction_type=args.prediction_type
@@ -717,10 +617,8 @@ def main():
                         f"Unknown prediction type {noise_scheduler.config.prediction_type}"
                     )
 
-                # No micro-conditions (512 model only)
                 added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
 
-                # Predict noise
                 model_pred = transformer(
                     noisy_latents,
                     encoder_hidden_states=prompt_embeds,
@@ -729,7 +627,6 @@ def main():
                     added_cond_kwargs=added_cond_kwargs,
                 ).sample.chunk(2, 1)[0]
 
-                # Simple MSE loss (no color distribution loss)
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
                 avg_loss = accelerator.gather(
@@ -737,13 +634,11 @@ def main():
                 ).mean()
                 train_loss += avg_loss.item() / args.gradient_accumulation_steps
 
-                # Backprop
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     params_to_clip = lora_layers
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
-                    # NaN gradient check
                     grads_finite = True
                     for param in params_to_clip:
                         if param.grad is not None and not torch.isfinite(param.grad).all():
@@ -764,6 +659,8 @@ def main():
                 progress_bar.update(1)
                 global_step += 1
                 accelerator.log({"train_loss": train_loss}, step=global_step)
+                epoch_train_loss += train_loss
+                epoch_train_steps += 1
                 train_loss = 0.0
 
                 if global_step % args.checkpointing_steps == 0:
@@ -779,8 +676,92 @@ def main():
                 break
 
         # Epoch-level checkpointing
-        if args.checkpointing_epochs is not None and (epoch + 1) % args.checkpointing_epochs == 0:
+        if (
+            args.checkpointing_epochs is not None
+            and (epoch + 1) % args.checkpointing_epochs == 0
+        ):
             save_checkpoint(global_step)
+
+        # Epoch summary and validation loss
+        avg_epoch_train_loss = epoch_train_loss / max(epoch_train_steps, 1)
+        if val_dataloader is not None and accelerator.is_main_process:
+            unwrapped_for_val = _unwrap(transformer)
+            unwrapped_for_val.eval()
+            val_losses = []
+            with torch.no_grad():
+                for val_batch in val_dataloader:
+                    val_pixel_values = val_batch["pixel_values"].to(
+                        dtype=weight_dtype, device=accelerator.device
+                    )
+                    val_latents = vae.encode(val_pixel_values).latent_dist.sample()
+                    val_latents = val_latents * vae.config.scaling_factor
+
+                    val_noise = torch.randn_like(val_latents)
+                    val_bsz = val_latents.shape[0]
+                    val_timesteps = torch.randint(
+                        0, noise_scheduler.config.num_train_timesteps,
+                        (val_bsz,), device=val_latents.device,
+                    ).long()
+
+                    val_noisy_latents = noise_scheduler.add_noise(
+                        val_latents, val_noise, val_timesteps
+                    )
+
+                    val_prompt_embeds = text_encoder(
+                        val_batch["input_ids"].to(accelerator.device),
+                        attention_mask=val_batch["prompt_attention_mask"].to(accelerator.device),
+                    )[0]
+
+                    if noise_scheduler.config.prediction_type == "epsilon":
+                        val_target = val_noise
+                    elif noise_scheduler.config.prediction_type == "v_prediction":
+                        val_target = noise_scheduler.get_velocity(
+                            val_latents, val_noise, val_timesteps
+                        )
+
+                    added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
+                    val_model_pred = unwrapped_for_val(
+                        val_noisy_latents,
+                        encoder_hidden_states=val_prompt_embeds,
+                        encoder_attention_mask=val_batch["prompt_attention_mask"].to(accelerator.device),
+                        timestep=val_timesteps,
+                        added_cond_kwargs=added_cond_kwargs,
+                    ).sample.chunk(2, 1)[0]
+
+                    val_loss_batch = F.mse_loss(
+                        val_model_pred.float(), val_target.float(), reduction="mean"
+                    )
+                    val_losses.append(val_loss_batch.item())
+
+            val_loss = sum(val_losses) / len(val_losses)
+            accelerator.log({"val_loss": val_loss, "epoch_avg_train_loss": avg_epoch_train_loss, "best_val_loss": best_val_loss, "epoch": epoch}, step=global_step)
+            logger.info(
+                f"Epoch {epoch}: train_loss={avg_epoch_train_loss:.4f}, val_loss={val_loss:.4f}"
+            )
+
+            # Best checkpoint tracking
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                save_path = os.path.join(args.output_dir, "best-checkpoint")
+                if os.path.exists(save_path):
+                    shutil.rmtree(save_path)
+                os.makedirs(save_path, exist_ok=True)
+                unwrapped_for_val.save_pretrained(
+                    os.path.join(save_path, "transformer_lora")
+                )
+                if args.train_text_encoder:
+                    unwrapped_text_encoder = _unwrap(text_encoder)
+                    unwrapped_text_encoder.save_pretrained(
+                        os.path.join(save_path, "text_encoder_lora")
+                    )
+                logger.info(
+                    f"New best val_loss={val_loss:.4f} at epoch {epoch}, saved to {save_path}"
+                )
+
+            unwrapped_for_val.train()
+        elif accelerator.is_main_process:
+            accelerator.log({"epoch_avg_train_loss": avg_epoch_train_loss, "epoch": epoch}, step=global_step)
+            logger.info(f"Epoch {epoch}: train_loss={avg_epoch_train_loss:.4f}")
 
         # Validation
         if accelerator.is_main_process:
@@ -789,83 +770,77 @@ def main():
                 and (epoch + 1) % args.validation_epochs == 0
             ):
                 logger.info(
-                    f"Running validation... Generating {args.num_validation_images} images "
-                    f"with prompt: {args.validation_prompt}"
+                    f"Running validation... Generating {args.num_validation_images} "
+                    f"images with prompt: {args.validation_prompt}"
                 )
-                pipeline_kwargs = {
-                    "transformer": accelerator.unwrap_model(
-                        transformer, keep_fp32_wrapper=False
-                    ),
-                    "vae": vae,
-                    "torch_dtype": weight_dtype,
-                }
-                if args.train_text_encoder:
-                    pipeline_kwargs["text_encoder"] = accelerator.unwrap_model(
-                        text_encoder, keep_fp32_wrapper=False
-                    )
+                try:
+                    # Save LoRA weights to temp dir, then load into a fresh
+                    # pipeline.  This avoids state-dict key mismatches that
+                    # occur after accelerator wrapping (the old strict=False
+                    # approach silently dropped all LoRA weights).
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        _unwrap(transformer).save_pretrained(tmp_dir)
 
-                pipeline = DiffusionPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    **pipeline_kwargs,
-                )
-                pipeline = pipeline.to(accelerator.device)
-                pipeline.set_progress_bar_config(disable=True)
+                        pipeline = DiffusionPipeline.from_pretrained(
+                            args.pretrained_model_name_or_path,
+                            torch_dtype=weight_dtype,
+                        )
+                        pipeline.load_lora_weights(tmp_dir)
+                        pipeline = pipeline.to(accelerator.device)
+                    pipeline.set_progress_bar_config(disable=True)
 
-                generator = torch.Generator(device=accelerator.device)
-                if args.seed is not None:
-                    generator = generator.manual_seed(args.seed)
+                    generator = torch.Generator(device=accelerator.device)
+                    if args.seed is not None:
+                        generator = generator.manual_seed(args.seed)
 
-                images = []
-                with torch.no_grad():
-                    for _ in range(args.num_validation_images):
-                        images.append(
-                            pipeline(
-                                args.validation_prompt,
-                                num_inference_steps=20,
-                                generator=generator,
-                            ).images[0]
+                    images = []
+                    with torch.no_grad():
+                        for _ in range(args.num_validation_images):
+                            images.append(
+                                pipeline(
+                                    args.validation_prompt,
+                                    num_inference_steps=20,
+                                    generator=generator,
+                                ).images[0]
+                            )
+
+                    for i, image in enumerate(images):
+                        image.save(
+                            os.path.join(args.output_dir, f"val_image_{epoch}_{i}.png")
                         )
 
-                for i, image in enumerate(images):
-                    image.save(
-                        os.path.join(args.output_dir, f"val_image_{epoch}_{i}.png")
-                    )
+                    for tracker in accelerator.trackers:
+                        if tracker.name == "tensorboard":
+                            np_images = np.stack([np.asarray(img) for img in images])
+                            tracker.writer.add_images(
+                                "validation", np_images, epoch, dataformats="NHWC"
+                            )
+                        if tracker.name == "wandb":
+                            tracker.log({
+                                "validation": [
+                                    wandb.Image(image, caption=f"{i}: {args.validation_prompt}")
+                                    for i, image in enumerate(images)
+                                ]
+                            })
 
-                for tracker in accelerator.trackers:
-                    if tracker.name == "tensorboard":
-                        np_images = np.stack([np.asarray(img) for img in images])
-                        tracker.writer.add_images(
-                            "validation", np_images, epoch, dataformats="NHWC"
-                        )
-                    if tracker.name == "wandb":
-                        tracker.log({
-                            "validation": [
-                                wandb.Image(image, caption=f"{i}: {args.validation_prompt}")
-                                for i, image in enumerate(images)
-                            ]
-                        })
-
-                del pipeline
-                torch.cuda.empty_cache()
+                    del pipeline
+                    torch.cuda.empty_cache()
+                except Exception as e:
+                    logger.warning(f"Validation failed (non-fatal): {e}")
+                    torch.cuda.empty_cache()
 
     # Save final LoRA weights
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        final_transformer = accelerator.unwrap_model(
-            transformer, keep_fp32_wrapper=False
-        )
+        final_transformer = _unwrap(transformer)
         final_transformer.save_pretrained(
             os.path.join(args.output_dir, "transformer_lora")
         )
-
         if args.train_text_encoder:
-            final_text_encoder = accelerator.unwrap_model(
-                text_encoder, keep_fp32_wrapper=False
-            )
+            final_text_encoder = _unwrap(text_encoder)
             final_text_encoder.save_pretrained(
                 os.path.join(args.output_dir, "text_encoder_lora")
             )
-
         logger.info(f"Final LoRA weights saved to {args.output_dir}")
 
     accelerator.end_training()

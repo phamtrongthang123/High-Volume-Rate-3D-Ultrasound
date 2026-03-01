@@ -56,7 +56,8 @@ if [ "$SAMPLE_ONLY" = false ]; then
         --validation_epochs 5 \
         --mixed_precision bf16 \
         --output_dir training/checkpoints/cetus_pixart_lora \
-        --report_to tensorboard \
+        --report_to wandb \
+        --val_data_dir training/dataset/val \
         --seed 42
     echo ""
 fi

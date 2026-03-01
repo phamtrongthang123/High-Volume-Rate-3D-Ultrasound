@@ -38,6 +38,7 @@ t1 = ED (End-Diastole), t2 = ES (End-Systole) — same patient, different cardia
 | `04_seqdiff_temporal.py` | SeqDiff warm-start demo (cold 200 vs warm 50 steps) |
 | `05_evaluate.py` | PSNR / SSIM / LPIPS metrics + visualizations |
 | `06_compare_prior_vs_data.py` | Prior vs. data distribution analysis (optional) |
+| `09_sweep_summary.py` | Multi-rate sweep summary: table, CSV, figure |
 
 ## Commands
 
@@ -45,12 +46,19 @@ t1 = ED (End-Diastole), t2 = ES (End-Systole) — same patient, different cardia
 # Full pipeline
 bash run_reconstruct.sh
 
+# Multi-rate sweep (r ∈ {2, 3, 4, 6, 10})
+bash run_sweep.sh
+
 # Individual steps
 python 00_download_data.py
 python 02_prepare_pseudo_volume.py
 python 03_reconstruct_volume.py
 python 04_seqdiff_temporal.py
 python 05_evaluate.py
+
+# Single r with custom output dir
+python 03_reconstruct_volume.py --accel-rate 6 --output-dir outputs/r6
+python 05_evaluate.py --accel-rate 6 --output-dir outputs/r6 --json-output outputs/r6/metrics.json
 ```
 
 ## Key Parameters
@@ -81,6 +89,10 @@ All outputs written to `outputs/`:
 - `04_seqdiff_comparison.png` — cold vs warm-start visual comparison
 - `05_evaluation.png` — GT | Reconstruction | Difference
 - `05_elevation_profile.png` — elevation coherence profile
+- `r{2,3,4,6,10}/` — per-rate sweep results (reconstructed_volume.npy, metrics.json, figures)
+- `09_sweep_summary.png` — metrics vs r figure with paper comparison
+- `09_sweep_summary.csv` — sweep results as CSV
+- `09_sweep_table.txt` — ASCII summary table
 
 ## Expected Metrics (CETUS patient01, r=4)
 

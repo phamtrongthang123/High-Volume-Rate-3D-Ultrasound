@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 prepare_dataset.py — Extract CETUS B-planes as 512x512 pseudo-RGB images.
 

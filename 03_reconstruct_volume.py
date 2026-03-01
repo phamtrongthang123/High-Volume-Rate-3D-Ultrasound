@@ -57,7 +57,8 @@ from zea.models.diffusion import DiffusionModel
 ACCEL_RATE = 4  # r ≥ 1, acceleration rate (Eq. 5, eq:inverse-problem)
 N_STEPS = 200  # T, diffusion steps (Algo 1 line 25)
 GAMMA = 15.0  # γ, guidance strength (5 too weak: M_norm still 7.8 at step 200; 35 caused instability)
-ZETA = 0.001  # ζ, smoothness strength (Algo 1 line 36)
+ZETA = 0.001  # ζ, azimuth TV smoothness strength (Algo 1 line 36)
+ZETA_EL = 0.003  # ζ_el, elevation TV smoothness strength (within B-planes)
 BATCH_SIZE = 16  # Batch B-planes through model for memory
 USE_SEQDIFF = False  # Enable SeqDiff warm-start from previous reconstruction
 SEQDIFF_TAU = 50  # τ', warm-start diffusion step (Algo 1 line 11, 19)
@@ -85,26 +86,31 @@ assert (N_el, N_ax, C) == (H, W, 1), (
 )
 
 
-def compute_tv_gradient_azimuth(X):
-    """TV gradient along azimuth (axis 1). Algo 1 lines 35-36.
+def compute_tv_gradient(X, axis):
+    """TV gradient along a given axis.
 
-    V ← ∇_X TV_az(X)
+    V ← ∇_X TV(X) along the specified axis.
 
     Args:
         X: Volume of shape (N_el, N_az, N_ax, C).
+        axis: Axis along which to compute TV (0=elevation, 1=azimuth).
 
     Returns:
         V: TV gradient of same shape.
     """
-    diff = np.diff(X, axis=1)  # (N_el, N_az-1, N_ax, C)
+    diff = np.diff(X, axis=axis)
     eps = 1e-8
     norm = np.sqrt(diff**2 + eps)
     normalized = diff / norm
 
     # Divergence (adjoint of gradient)
     div = np.zeros_like(X)
-    div[:, :-1] += normalized
-    div[:, 1:] -= normalized
+    slc_lo = [slice(None)] * X.ndim
+    slc_hi = [slice(None)] * X.ndim
+    slc_lo[axis] = slice(None, -1)
+    slc_hi[axis] = slice(1, None)
+    div[tuple(slc_lo)] += normalized
+    div[tuple(slc_hi)] -= normalized
 
     return -div  # Negative divergence as TV gradient
 
@@ -360,10 +366,12 @@ for step in range(start_step, N_STEPS):
     X_tau_minus_1 = np.transpose(x_tau_minus_1, (1, 0, 2, 3))
 
     # --- TV regularization (Algo 1 lines 35-36) ---
-    # V ← ∇_X TV_az(X_{τ-1})
-    # X_{τ-1} ← X_{τ-1} - α_{τ-1} ζ V
-    V = compute_tv_gradient_azimuth(X_tau_minus_1)
-    X_tau_minus_1 = X_tau_minus_1 - alpha_tau_minus_1 * ZETA * V
+    # Azimuth TV (between B-planes): V_az ← ∇_X TV_az(X)
+    V_az = compute_tv_gradient(X_tau_minus_1, axis=1)
+    X_tau_minus_1 = X_tau_minus_1 - alpha_tau_minus_1 * ZETA * V_az
+    # Elevation TV (within B-planes): smooths between observed/missing rows
+    V_el = compute_tv_gradient(X_tau_minus_1, axis=0)
+    X_tau_minus_1 = X_tau_minus_1 - alpha_tau_minus_1 * ZETA_EL * V_el
 
     # --- Back to B-planes for next step ---
     x_tau = np.transpose(X_tau_minus_1, (1, 0, 2, 3))

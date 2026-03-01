@@ -4,10 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(dirname "$(realpath "$0")")"
 SCRIPT_DIR="$ROOT_DIR"
 
-# Activate virtual environment if present (skip if using system/conda Python)
-if [ -f "$ROOT_DIR/.venv_zea/bin/activate" ]; then
-    source "$ROOT_DIR/.venv_zea/bin/activate"
-fi
+# Activate conda environment
+eval "$(conda shell.bash hook)"
+conda activate zea
 cd "$SCRIPT_DIR"
 export KERAS_BACKEND=jax
 export ZEA_CACHE_DIR="$SCRIPT_DIR/cache"
@@ -20,15 +19,15 @@ python -c "import jax; print(f'JAX: {jax.__version__}')"
 python -c "import jax; print(f'Devices: {jax.devices()}')"
 python -c "import keras; print(f'Keras: {keras.__version__}, backend: {keras.backend.backend()}')"
 
-# # Step 1: Verify prior
-# echo ""
-# echo "=== Step 1: Verify prior ==="
-# python 01_verify_prior.py
+# Step 1: Verify prior
+echo ""
+echo "=== Step 1: Verify prior ==="
+python 01_verify_prior.py
 
-# # Step 2: Prepare pseudo-volume
-# echo ""
-# echo "=== Step 2: Prepare pseudo-volume ==="
-# python 02_prepare_pseudo_volume.py
+# Step 2: Prepare pseudo-volume
+echo ""
+echo "=== Step 2: Prepare pseudo-volume ==="
+python 02_prepare_pseudo_volume.py
 
 # Step 3: Reconstruct volume (main algorithm)
 echo ""

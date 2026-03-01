@@ -78,8 +78,11 @@ def scan_convert_img(img_2d):
     return np.array(out[0])
 
 
-# Select planes to display
-display_planes = missing_indices[:N_DISPLAY]
+# Select planes to display — spread across the middle of the volume
+# (edge planes have little signal in CETUS data)
+mid = len(missing_indices) // 2
+half_span = N_DISPLAY // 2
+display_planes = missing_indices[mid - half_span : mid - half_span + N_DISPLAY]
 n_display = len(display_planes)
 
 fig, axes = plt.subplots(n_display, 3, figsize=(15, 5 * n_display))

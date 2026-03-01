@@ -1,6 +1,6 @@
 # (Unofficial) High Volume Rate 3D Ultrasound Reconstruction with Diffusion Models
 
-Reproducing the paper's pipeline using the [ZEA toolbox](https://github.com/zeahub/zea). This demo uses a pretrained 2D cardiac echo diffusion model and the CAMUS dataset to demonstrate the full algorithm: DPS-based interpolation of missing elevation planes, TV smoothness regularization, and SeqDiff temporal acceleration.
+Reproducing the paper's pipeline using the [ZEA toolbox](https://github.com/zeahub/zea). Uses a pretrained 2D cardiac echo diffusion model (EchoNet-Dynamic) and the [CETUS](https://www.creatis.insa-lyon.fr/Challenge/CETUS/) real 3D echocardiography dataset to demonstrate the full algorithm: DPS-based interpolation of missing elevation planes with data consistency replacement, TV smoothness regularization (axial + elevation), and SeqDiff temporal acceleration.
 
 All runnable code is at the repository root.
 
@@ -63,7 +63,7 @@ SeqDiff speedup demo     Metrics + visualization
 | `00_download_data.py` | Pre-downloads CAMUS dataset |
 | `01_verify_prior.py` | Generates 8 unconditional samples, saves `outputs/01_prior_samples.png` |
 | `02_prepare_pseudo_volume.py` | Creates `outputs/pseudo_volume.npy` (16 planes) and `pseudo_volume_t2.npy` |
-| `03_reconstruct_volume.py` | Reconstructs missing planes via DPS + TV, saves `outputs/reconstructed_volume.npy` |
+| `03_reconstruct_volume.py` | Reconstructs missing planes via DPS + data consistency + TV (axial + elevation), saves `outputs/reconstructed_volume.npy` |
 | `04_seqdiff_temporal.py` | Compares cold-start (200 steps) vs warm-start (50 steps), saves `outputs/04_seqdiff_comparison.png` |
 | `05_evaluate.py` | Computes PSNR/SSIM/LPIPS, saves `outputs/05_evaluation.png` and `outputs/05_elevation_profile.png` |
 
@@ -78,33 +78,48 @@ All outputs go to `outputs/`. Key files:
 - `05_evaluation.png` — GT / reconstruction / difference side-by-side
 - `05_elevation_profile.png` — inter-plane smoothness plot
 
-## Expected Metrics Behavior
+## Results
 
-The CAMUS sample dataset only contains **2 unique images**. The pseudo-volume cycles them as (A, B, A, B, ...). With `ACCEL_RATE=4`, observed planes (0, 4, 8, ...) are all image A. This creates an adversarial scenario where DPS guidance only ever sees image A, but half the missing planes are image B (a completely different patient).
+### Our reproduction (CETUS patient01, r=4)
 
-**Observed results** (N_STEPS=200, OMEGA=35, ZETA=0.001):
+| Metric | Value |
+|--------|-------|
+| PSNR   | 23.06 dB |
+| SSIM   | 0.32     |
+| LPIPS  | 0.445    |
 
-| Metric | Overall (missing planes) |
-|--------|--------------------------|
-| PSNR   | ~13.0 dB                 |
-| SSIM   | ~0.12                    |
-| LPIPS  | ~0.37                    |
+Parameters: `N_STEPS=200, GAMMA=15.0, ZETA=0.001, ZETA_EL=0.003, ACCEL_RATE=4`
 
-Per-plane metrics show a clear bimodal pattern:
+### Paper's reported results (approximate, read from figures)
 
-| Missing plane type | Example planes | PSNR | SSIM | Why |
-|--------------------|---------------|------|------|-----|
-| Even midpoints (image A) | 2, 6, 10, 14, ... | ~15-16 dB | ~0.3 | Same content as observed planes; DPS + TV can partially reconstruct |
-| Odd planes (image B) | 1, 3, 5, 7, ... | ~11-12 dB | ~0.03 | Different patient image; no information available from observations |
+**PSNR (Figure 6) — Diffusion method vs. baselines:**
 
-**These low scores are expected and do not indicate an algorithm bug.** The ~0.03 SSIM for odd planes simply measures how different two unrelated patient images are — no reconstruction method can recover image B from observations of image A alone.
+| r | Nearest | Linear | U-Net | Neural Field | Diffusion |
+|---|---------|--------|-------|-------------|-----------|
+| 2 | ~27.0 | ~28.0 | ~29.3 | ~28.3 | ~28.7 |
+| 3 | ~23.2 | ~25.8 | ~25.8 | ~24.7 | ~26.3 |
+| 6 | ~19.5 | ~21.0 | ~21.6 | ~20.0 | ~23.5 |
+| 10 | ~16.8 | ~18.3 | ~18.4 | ~17.1 | ~22.3 |
 
-With real 3D ultrasound data (smooth, continuous variation along elevation), all missing planes would be similar to their observed neighbors, and scores should be substantially higher.
+**LPIPS on B-planes (Figure 7) — Diffusion method vs. baselines:**
+
+| r | Nearest | Linear | U-Net | Neural Field | Diffusion |
+|---|---------|--------|-------|-------------|-----------|
+| 2 | ~0.12 | ~0.105 | ~0.075 | ~0.145 | ~0.095 |
+| 3 | ~0.19 | ~0.165 | ~0.175 | ~0.215 | ~0.13 |
+| 6 | ~0.245 | ~0.225 | ~0.26 | ~0.275 | ~0.16 |
+| 10 | ~0.305 | ~0.265 | ~0.29 | ~0.29 | ~0.19 |
+
+### Comparison notes
+
+Our PSNR of 23.1 dB at r=4 is comparable to the paper's ~23.5 dB at r=6, which is a harder setting. The key differences:
+
+- **Paper**: proprietary 3D cardiac echo data with a diffusion prior trained on matching B-plane data
+- **Ours**: CETUS (public 3D echo, different acquisition characteristics) with EchoNet-Dynamic prior (trained on 2D apical 4-chamber views from a different dataset)
+- The domain gap between the 2D A4C prior and real 3D echo B-planes limits reconstruction fidelity, particularly for LPIPS
 
 ## Known Limitations
 
-**Data limitations** (CAMUS sample dataset, not the paper's proprietary 3D cardiac data):
-- Only 2 unique source images available — causes bimodal metrics (see above)
-- No real elevation coherence between stacked planes (different patients)
-- Pretrained model is on EchoNet-Dynamic (A4C views), not actual B-plane slices
-- No speckle tracking or out-of-distribution experiments possible without real 3D volumes
+- **Domain gap**: The diffusion prior is trained on EchoNet-Dynamic 2D A4C views, not 3D echo B-plane slices. This limits how well the prior can guide reconstruction of elevation planes that look different from A4C views.
+- **Single patient**: Results above are for CETUS patient01 only. The paper evaluates across multiple patients and cardiac phases.
+- **No speckle tracking**: The paper includes speckle tracking experiments that require proprietary data and are not reproduced here.

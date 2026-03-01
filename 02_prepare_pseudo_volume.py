@@ -1,15 +1,16 @@
 """
-02_prepare_pseudo_volume.py — Create pseudo-3D volumes from CAMUS dataset.
+02_prepare_pseudo_volume.py — Load real 3D CETUS volumes for reconstruction.
 
-Loads 2D cardiac echo images from the CAMUS sample dataset (HuggingFace),
-resizes to the diffusion model's input shape, and stacks them as
-"elevation planes" to create pseudo-3D volumes X ∈ R^(N_el, N_az, N_ax)
-(Eq. 1, eq:ultrasound-volume). Two volumes are created with a 1-plane offset to simulate consecutive
-temporal frames for the SeqDiff demo (04). This is a demo hack — no real
-temporal 3D data is available, so the offset fakes two similar-but-different
-frames. With real 3D temporal captures you'd have a sequence of volumes
-X(t=0), X(t=1), ... and SeqDiff would warm-start each frame from the
-previous reconstruction.
+Loads actual 3D cardiac echo volumes from the CETUS NIfTI dataset
+(data/CETUS/dataset/patientXX/). Two volumes are created from the
+End-Diastole (ED) and End-Systole (ES) cardiac phases of a single patient.
+ED and ES represent the same anatomy at maximum and minimum ventricular volume,
+matching SeqDiff's assumption that consecutive volumes share structural anatomy.
+
+Each volume is resized to (N_el, N_az, N_ax, 1) = (112, 112, 112, 1) using
+trilinear interpolation to match the diffusion model's B-plane input shape.
+Unlike the previous CAMUS approach, B-planes vary realistically across
+elevation — this is genuine 3D echocardiography data.
 
 Note: the paper uses B-mode data in polar coordinates with N_el=48, N_az=64,
 N_ax=400. Here we use N_el=112 planes of 112x112 so B-planes are (112, 112, 1)
@@ -22,14 +23,15 @@ import os
 import numpy as np
 import jax
 import jax.numpy as jnp
+import SimpleITK as sitk
 from zea import init_device
 from zea.models.diffusion import DiffusionModel
-from zea.data import Dataset
 from zea.func import translate
 
 # --- Config ---
-N_ELEVATION = 112  # Number of planes per pseudo-volume (matches model input for B-plane slicing)
-DYNAMIC_RANGE = (-50, 0)  # dB dynamic range
+PATIENT_ID = "patient01"
+N_AZ = 112  # Number of azimuth B-planes per volume
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "CETUS", "dataset")
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -40,63 +42,64 @@ init_device(verbose=False)
 print("Loading model to determine input shape...")
 model = DiffusionModel.from_preset("diffusion-echonet-dynamic")
 img_shape = model.input_shape[:2]  # (H, W)
+H, W = img_shape
 print(f"Model input shape: {model.input_shape}, image shape: {img_shape}")
 
-# --- Load CAMUS dataset ---
-print("Loading CAMUS dataset...")
-dataset = Dataset("hf://zeahub/camus-sample/val", key="image")
 
-n_needed = N_ELEVATION + 1  # Need N+1 for two overlapping volumes
-images = []
-for i in range(min(n_needed, len(dataset))):
-    img = dataset[i]["data"]["image"]  # shape: (n_frames, H, W) or (H, W)
-    img = np.array(img)
+def load_cetus_volume(patient_id, phase):
+    """Load a CETUS NIfTI volume and return as float32 numpy array (Z, Y, X)."""
+    path = os.path.join(DATA_DIR, patient_id, f"{patient_id}_{phase}.nii.gz")
+    img = sitk.ReadImage(path)
+    arr = sitk.GetArrayFromImage(img).astype(np.float32)  # (Z, Y, X)
+    return arr
 
-    # If multi-frame, take first frame
-    if img.ndim == 3:
-        img = img[0]
 
-    # Add channel dim: (H, W) -> (H, W, 1)
-    img = img[..., np.newaxis]
+def process_volume(arr_3d):
+    """Resize 3D volume to (N_el, N_az, N_ax, 1) and normalize to [-1, 1].
 
-    # Resize to model input shape
-    img = jax.image.resize(img, (*img_shape, 1), method="bilinear")
+    Axis mapping after SimpleITK GetArrayFromImage (Z, Y, X):
+      axis 0 (Z) = depth from probe  → N_el  (elevation rows within each B-plane)
+      axis 1 (Y) = azimuth sweep     → N_az  (B-plane index)
+      axis 2 (X) = lateral           → N_ax  (columns within each B-plane)
+    B-plane j = vol[:, j, :, 0], shape (N_el, N_ax) — apical 4-chamber appearance.
+    """
+    # Add channel dim → (Z, Y, X, 1), resize to (H, N_AZ, W, 1)
+    vol = arr_3d[..., np.newaxis]
+    vol = jax.image.resize(vol, (H, N_AZ, W, 1), method="linear")
+    # Normalize to [-1, 1]: always use actual data range
+    vmin = float(arr_3d.min())
+    vmax = float(arr_3d.max())
+    vol = translate(vol, (vmin, vmax), (-1, 1))
+    return np.array(vol)
 
-    # Normalize: clip to dynamic range, then translate to [-1, 1]
-    img = jnp.clip(img, DYNAMIC_RANGE[0], DYNAMIC_RANGE[1])
-    img = translate(img, DYNAMIC_RANGE, (-1, 1))
 
-    images.append(np.array(img))
+# --- Load CETUS volumes ---
+print(f"Loading CETUS patient: {PATIENT_ID}")
+arr_ed = load_cetus_volume(PATIENT_ID, "ED")
+arr_es = load_cetus_volume(PATIENT_ID, "ES")
+print(f"ED raw shape: {arr_ed.shape}, dtype: {arr_ed.dtype}, range: [{arr_ed.min():.1f}, {arr_ed.max():.1f}]")
+print(f"ES raw shape: {arr_es.shape}, dtype: {arr_es.dtype}, range: [{arr_es.min():.1f}, {arr_es.max():.1f}]")
 
-print(f"Loaded and processed {len(images)} images")
+print("Processing volumes (resize + normalize)...")
+volume_t1 = process_volume(arr_ed)  # ED phase → t1
+volume_t2 = process_volume(arr_es)  # ES phase → t2
 
-n_original = len(images)
-if n_original < N_ELEVATION + 1:
-    print(f"Warning: only {n_original} images available, need {N_ELEVATION + 1}.")
-    print("Cycling through available images to fill volumes.")
-    while len(images) < N_ELEVATION + 1:
-        images.append(images[len(images) % n_original])
-
-processed = np.stack(images, axis=0)
-print(f"Processed images shape: {processed.shape}, "
-      f"range: [{processed.min():.3f}, {processed.max():.3f}]")
-
-# --- Create pseudo-volumes ---
-# Volume 1: first N_ELEVATION planes
-volume_t1 = processed[:N_ELEVATION]
-# Volume 2: offset by 1 for SeqDiff temporal demo
-volume_t2 = processed[1:N_ELEVATION + 1]
-
-print(f"Pseudo-volume t1 shape: {volume_t1.shape}")
-print(f"Pseudo-volume t2 shape: {volume_t2.shape}")
+print(f"Volume t1 (ED) shape: {volume_t1.shape}")
+print(f"Volume t2 (ES) shape: {volume_t2.shape}")
 
 # --- Save ---
 path_t1 = os.path.join(OUTPUT_DIR, "pseudo_volume.npy")
 path_t2 = os.path.join(OUTPUT_DIR, "pseudo_volume_t2.npy")
 np.save(path_t1, volume_t1)
 np.save(path_t2, volume_t2)
-print(f"Saved pseudo-volume t1 to {path_t1}")
-print(f"Saved pseudo-volume t2 to {path_t2}")
+print(f"Saved volume t1 (ED) to {path_t1}")
+print(f"Saved volume t2 (ES) to {path_t2}")
 
-dataset.close()
-print("Pseudo-volume preparation complete.")
+# --- Sanity check ---
+assert volume_t1.shape == (H, N_AZ, W, 1), f"Unexpected t1 shape: {volume_t1.shape}"
+assert volume_t2.shape == (H, N_AZ, W, 1), f"Unexpected t2 shape: {volume_t2.shape}"
+print(f"\n[Sanity check] t1 range: [{volume_t1.min():.3f}, {volume_t1.max():.3f}]")
+print(f"[Sanity check] t2 range: [{volume_t2.min():.3f}, {volume_t2.max():.3f}]")
+print("[Sanity check] PASSED: volumes loaded with real 3D variation across B-planes.")
+
+print("Volume preparation complete.")

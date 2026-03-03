@@ -22,7 +22,7 @@ from pixart_diffusion_model import PixArtDiffusionModel
 # --- Config ---
 PRETRAINED_PATH = "PixArt-alpha/PixArt-XL-2-512x512"
 LORA_PATH = os.path.join(SCRIPT_DIR, "checkpoints", "cetus_pixart_lora", "transformer_lora")
-VAE_DECODER_PATH = os.path.join(SCRIPT_DIR, "checkpoints", "vae_decoder_finetuned", "vae_decoder.pt")
+VAE_DECODER_PATH = os.path.join(SCRIPT_DIR, "checkpoints", "vae_decoder_test", "vae_decoder_best.pt")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "outputs")
 N_SAMPLES = 16
 N_STEPS = 20
@@ -98,7 +98,8 @@ def main():
     sample_images = []
     for i in range(N_SAMPLES):
         img = all_samples[i, :, :, 0]  # (112, 112)
-        img = (img + 1) / 2 * 255  # [-1, 1] → [0, 255]
+        vmin, vmax = img.min(), img.max()
+        img = (img - vmin) / (vmax - vmin + 1e-8) * 255  # per-image min-max stretch
         img = np.clip(img, 0, 255).astype(np.uint8)
         sample_images.append(img)
 
@@ -113,11 +114,17 @@ def main():
     if os.path.exists(volume_path):
         X_gt = np.load(volume_path)  # (112, 112, 112, 1)
         real_images = []
-        # Pick evenly spaced azimuth slices
-        indices = np.linspace(0, X_gt.shape[1] - 1, N_SAMPLES).astype(int)
-        for j in indices:
-            bplane = X_gt[:, j, :, 0]  # (112, 112)
-            bplane = (bplane + 1) / 2 * 255
+        # Pick evenly spaced azimuth slices from the cone interior
+        # (edge slices are outside the ultrasound cone and contain no signal)
+        n_az = X_gt.shape[1]
+        az_start, az_end = int(n_az * 0.25), int(n_az * 0.75)
+        indices = np.linspace(az_start, az_end, N_SAMPLES).astype(int)
+        # Use global min/max across all selected slices for consistent display
+        all_bplanes = [X_gt[:, j, :, 0] for j in indices]
+        gmin = min(b.min() for b in all_bplanes)
+        gmax = max(b.max() for b in all_bplanes)
+        for bplane in all_bplanes:
+            bplane = (bplane - gmin) / (gmax - gmin + 1e-8) * 255
             bplane = np.clip(bplane, 0, 255).astype(np.uint8)
             real_images.append(bplane)
 

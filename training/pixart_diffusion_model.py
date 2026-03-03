@@ -15,7 +15,7 @@ import math
 import numpy as np
 import torch
 import torch.nn.functional as F
-from diffusers import AutoencoderKL, DDPMScheduler, Transformer2DModel
+from diffusers import AutoencoderKL, DDPMScheduler, DPMSolverMultistepScheduler, Transformer2DModel
 from peft import PeftModel
 from transformers import T5EncoderModel, T5Tokenizer
 
@@ -82,16 +82,20 @@ class PixArtDiffusionModel:
         self.text_encoder.to(self.device)
         self.text_encoder.eval()
 
-        # Load noise scheduler
+        # Load noise scheduler (DDPM for training/DPS, DPM-Solver for sampling)
         self.noise_scheduler = DDPMScheduler.from_pretrained(
+            pretrained_path, subfolder="scheduler",
+        )
+        self.sampling_scheduler = DPMSolverMultistepScheduler.from_pretrained(
             pretrained_path, subfolder="scheduler",
         )
         self.num_train_timesteps = self.noise_scheduler.config.num_train_timesteps
 
-        # Pre-encode the fixed prompt
+        # Pre-encode the fixed prompt and null prompt (for CFG)
         self.prompt_embeds, self.prompt_attention_mask = self._encode_prompt(
             "a cardiac ultrasound b-plane image"
         )
+        self.null_prompt_embeds, self.null_prompt_mask = self._encode_prompt("")
 
         # Properties matching ZEA interface
         self.input_shape = (112, 112, 1)
@@ -201,7 +205,7 @@ class PixArtDiffusionModel:
         x = F.interpolate(x, size=(112, 112), mode="bilinear", align_corners=False)
         # (B, C, H, W) → (B, H, W, C)
         x = x.permute(0, 2, 3, 1)  # (B, 112, 112, 1)
-        return x.cpu().detach().numpy()
+        return x.cpu().detach().float().numpy()
 
     def _continuous_t_to_discrete_timestep(self, sigma, alpha):
         """Convert continuous (sigma, alpha) to discrete DDPM timestep.
@@ -311,8 +315,34 @@ class PixArtDiffusionModel:
         pred_images = (noisy_images - sigma * pred_noises) / alpha
         return pred_images, pred_noises
 
-    def sample(self, n_samples=1, n_steps=20):
-        """Generate unconditional samples via reverse diffusion.
+    def predict_noise_latent_uncond(self, noisy_latents, timestep):
+        """Predict noise in latent space with null (unconditional) prompt."""
+        B = noisy_latents.shape[0]
+        timesteps = torch.full((B,), timestep, device=self.device, dtype=torch.long)
+
+        prompt_embeds = self.null_prompt_embeds.expand(B, -1, -1)
+        prompt_mask = self.null_prompt_mask.expand(B, -1)
+
+        added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
+
+        model_output = self.transformer(
+            noisy_latents.to(dtype=self.weight_dtype),
+            encoder_hidden_states=prompt_embeds,
+            encoder_attention_mask=prompt_mask,
+            timestep=timesteps,
+            added_cond_kwargs=added_cond_kwargs,
+        ).sample
+
+        noise_pred = model_output.chunk(2, dim=1)[0]
+        return noise_pred.float()
+
+    def sample(self, n_samples=1, n_steps=20, guidance_scale=4.5):
+        """Generate samples via reverse diffusion with classifier-free guidance.
+
+        Args:
+            n_samples: Number of samples to generate.
+            n_steps: Number of denoising steps.
+            guidance_scale: CFG scale (PixArt-α default: 4.5).
 
         Returns:
             samples: (n_samples, 112, 112, 1) numpy array in [-1, 1].
@@ -322,13 +352,18 @@ class PixArtDiffusionModel:
             n_samples, 4, 64, 64, device=self.device, dtype=torch.float32,
         )
 
-        # Set up scheduler
-        self.noise_scheduler.set_timesteps(n_steps, device=self.device)
-        timesteps = self.noise_scheduler.timesteps
+        # Use DPM-Solver for fast, high-quality sampling (matches DiffusionPipeline)
+        self.sampling_scheduler.set_timesteps(n_steps, device=self.device)
+        timesteps = self.sampling_scheduler.timesteps
 
         for t in timesteps:
-            noise_pred = self.predict_noise_latent(latents, int(t))
-            latents = self.noise_scheduler.step(
+            noise_pred_cond = self.predict_noise_latent(latents, int(t))
+            noise_pred_uncond = self.predict_noise_latent_uncond(latents, int(t))
+            # Classifier-free guidance
+            noise_pred = noise_pred_uncond + guidance_scale * (
+                noise_pred_cond - noise_pred_uncond
+            )
+            latents = self.sampling_scheduler.step(
                 noise_pred, int(t), latents, return_dict=False,
             )[0]
 

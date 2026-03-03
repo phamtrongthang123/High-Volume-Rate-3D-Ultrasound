@@ -52,6 +52,7 @@ SEQDIFF_TAU = 50     # τ', warm-start diffusion step
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "outputs")
 PRETRAINED_PATH = "PixArt-alpha/PixArt-XL-2-512x512"
 LORA_PATH = os.path.join(SCRIPT_DIR, "checkpoints", "cetus_pixart_lora", "transformer_lora")
+VAE_DECODER_PATH = os.path.join(SCRIPT_DIR, "checkpoints", "vae_decoder_finetuned", "vae_decoder.pt")
 
 # Check for command-line override of LoRA path
 if len(sys.argv) > 1:
@@ -317,9 +318,17 @@ def main():
     else:
         print(f"Loading PixArt-α with LoRA from {lora_path}")
 
+    vae_decoder_path = VAE_DECODER_PATH if os.path.exists(VAE_DECODER_PATH) else None
+    if vae_decoder_path is None:
+        print(f"NOTE: Fine-tuned VAE decoder not found at {VAE_DECODER_PATH}")
+        print("Using base VAE decoder.")
+    else:
+        print(f"Loading fine-tuned VAE decoder from {vae_decoder_path}")
+
     print(f"Loading PixArt-α model from {PRETRAINED_PATH}...")
     model = PixArtLatentDiffusionModel(
         PRETRAINED_PATH, lora_path=lora_path, device=device,
+        vae_decoder_path=vae_decoder_path,
     )
     print("Model loaded.")
 

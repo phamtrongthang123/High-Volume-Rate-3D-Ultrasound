@@ -1,6 +1,6 @@
 # (Unofficial) High Volume Rate 3D Ultrasound Reconstruction with Diffusion Models
 
-Reproducing the paper's pipeline using the [ZEA toolbox](https://github.com/zeahub/zea). Uses a pretrained 2D cardiac echo diffusion model (EchoNet-Dynamic) and the [CETUS](https://www.creatis.insa-lyon.fr/Challenge/CETUS/) real 3D echocardiography dataset to demonstrate the full algorithm: DPS-based interpolation of missing elevation planes with data consistency replacement, TV smoothness regularization (axial + elevation), and SeqDiff temporal acceleration.
+Reproducing the paper's pipeline using the [ZEA toolbox](https://github.com/tue-bmd/zea). Uses a pretrained 2D cardiac echo diffusion model (EchoNet-Dynamic) and the [CETUS](https://www.creatis.insa-lyon.fr/Challenge/CETUS/) real 3D echocardiography dataset to demonstrate the full algorithm: DPS-based interpolation of missing elevation planes with data consistency replacement, TV smoothness regularization (axial + elevation), and SeqDiff temporal acceleration.
 
 All runnable code is at the repository root.
 

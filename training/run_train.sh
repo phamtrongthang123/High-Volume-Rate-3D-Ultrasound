@@ -4,6 +4,7 @@
 # Usage:
 #   bash training/run_train.sh           # Full pipeline
 #   bash training/run_train.sh --skip-dataset  # Skip dataset prep
+#   bash training/run_train.sh --skip-vae      # Skip VAE decoder fine-tuning
 #   bash training/run_train.sh --sample-only   # Only generate samples
 set -euo pipefail
 
@@ -12,10 +13,12 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Parse arguments
 SKIP_DATASET=false
+SKIP_VAE=false
 SAMPLE_ONLY=false
 for arg in "$@"; do
     case $arg in
         --skip-dataset) SKIP_DATASET=true ;;
+        --skip-vae) SKIP_VAE=true ;;
         --sample-only) SAMPLE_ONLY=true ;;
     esac
 done
@@ -32,6 +35,26 @@ cd "$PROJECT_DIR"
 if [ "$SKIP_DATASET" = false ] && [ "$SAMPLE_ONLY" = false ]; then
     echo "=== Step 1: Preparing CETUS B-plane dataset ==="
     python training/prepare_dataset.py
+    echo ""
+fi
+
+# Step 1.5: Fine-tune VAE decoder
+if [ "$SAMPLE_ONLY" = false ] && [ "$SKIP_VAE" = false ]; then
+    echo "=== Step 1.5: Fine-tuning VAE decoder on ultrasound B-planes ==="
+    accelerate launch --config_file training/accelerate_config.yaml \
+        training/train_vae_decoder.py \
+        --pretrained_model_name_or_path PixArt-alpha/PixArt-XL-2-512x512 \
+        --train_data_dir training/dataset/train \
+        --val_data_dir training/dataset/val \
+        --output_dir training/checkpoints/vae_decoder_finetuned \
+        --num_train_epochs 20 \
+        --train_batch_size 8 \
+        --learning_rate 1e-5 \
+        --lr_scheduler cosine \
+        --mixed_precision bf16 \
+        --validation_epochs 5 \
+        --report_to wandb \
+        --seed 42
     echo ""
 fi
 

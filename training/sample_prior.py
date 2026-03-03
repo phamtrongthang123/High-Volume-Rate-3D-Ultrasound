@@ -22,6 +22,7 @@ from pixart_diffusion_model import PixArtDiffusionModel
 # --- Config ---
 PRETRAINED_PATH = "PixArt-alpha/PixArt-XL-2-512x512"
 LORA_PATH = os.path.join(SCRIPT_DIR, "checkpoints", "cetus_pixart_lora", "transformer_lora")
+VAE_DECODER_PATH = os.path.join(SCRIPT_DIR, "checkpoints", "vae_decoder_finetuned", "vae_decoder.pt")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "outputs")
 N_SAMPLES = 16
 N_STEPS = 20
@@ -64,9 +65,20 @@ def main():
     else:
         print(f"Loading LoRA weights from {lora_path}")
 
+    # Check VAE decoder path
+    vae_decoder_path = VAE_DECODER_PATH if os.path.exists(VAE_DECODER_PATH) else None
+    if vae_decoder_path is None:
+        print(f"NOTE: Fine-tuned VAE decoder not found at {VAE_DECODER_PATH}")
+        print("Using base VAE decoder.")
+    else:
+        print(f"Loading fine-tuned VAE decoder from {vae_decoder_path}")
+
     # Load model
     print(f"Loading PixArt-α from {PRETRAINED_PATH}...")
-    model = PixArtDiffusionModel(PRETRAINED_PATH, lora_path=lora_path, device=device)
+    model = PixArtDiffusionModel(
+        PRETRAINED_PATH, lora_path=lora_path, device=device,
+        vae_decoder_path=vae_decoder_path,
+    )
     print("Model loaded.")
 
     # Generate samples

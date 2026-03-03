@@ -20,6 +20,23 @@ from peft import PeftModel
 from transformers import T5EncoderModel, T5Tokenizer
 
 
+def load_finetuned_vae_decoder(vae, path):
+    """Load fine-tuned decoder + post_quant_conv weights into a VAE.
+
+    Args:
+        vae: AutoencoderKL instance.
+        path: Path to the .pt checkpoint (decoder + post_quant_conv state dict).
+    """
+    state_dict = torch.load(path, map_location="cpu", weights_only=True)
+    missing, unexpected = vae.load_state_dict(state_dict, strict=False)
+    # Only decoder.* and post_quant_conv.* keys should be loaded;
+    # encoder.* and quant_conv.* will appear as "missing" — that's expected.
+    loaded = [k for k in state_dict if k not in unexpected]
+    print(f"Loaded {len(loaded)} fine-tuned VAE decoder keys from {path}")
+    if unexpected:
+        print(f"  WARNING: {len(unexpected)} unexpected keys: {unexpected[:5]}")
+
+
 class PixArtDiffusionModel:
     """Drop-in wrapper for PixArt-α with LoRA, for DPS reconstruction.
 
@@ -28,7 +45,8 @@ class PixArtDiffusionModel:
     conversion between 112x112 grayscale and 512x512 RGB latent space.
     """
 
-    def __init__(self, pretrained_path, lora_path=None, device="cuda"):
+    def __init__(self, pretrained_path, lora_path=None, device="cuda",
+                 vae_decoder_path=None):
         self.device = torch.device(device)
         self.weight_dtype = torch.bfloat16
 
@@ -36,6 +54,8 @@ class PixArtDiffusionModel:
         self.vae = AutoencoderKL.from_pretrained(
             pretrained_path, subfolder="vae", torch_dtype=self.weight_dtype,
         )
+        if vae_decoder_path is not None:
+            load_finetuned_vae_decoder(self.vae, vae_decoder_path)
         self.vae.requires_grad_(False)
         self.vae.to(self.device)
 
@@ -327,7 +347,8 @@ class PixArtLatentDiffusionModel:
     happens at the final step.
     """
 
-    def __init__(self, pretrained_path, lora_path=None, device="cuda"):
+    def __init__(self, pretrained_path, lora_path=None, device="cuda",
+                 vae_decoder_path=None):
         self.device = torch.device(device)
         self.weight_dtype = torch.bfloat16
 
@@ -335,6 +356,8 @@ class PixArtLatentDiffusionModel:
         self.vae = AutoencoderKL.from_pretrained(
             pretrained_path, subfolder="vae", torch_dtype=self.weight_dtype,
         )
+        if vae_decoder_path is not None:
+            load_finetuned_vae_decoder(self.vae, vae_decoder_path)
         self.vae.requires_grad_(False)
         self.vae.to(self.device)
 

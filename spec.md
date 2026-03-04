@@ -45,10 +45,14 @@ Create `pipeline_pixart/` at the project root containing a complete, runnable pi
 If `best-checkpoint` doesn't exist, fall back to the highest-numbered checkpoint available
 under `training/checkpoints/cetus_pixart_lora/`.
 
+
+## Machine
+**1 GPU** for dev (no multi-GPU training). if you need hpc, **SLURM partitions:** Only use `vgpu` and `agpu` partitions. Do not submit jobs to any other partition. See example_slurm.sh
+
 ## Do NOT
 
 - Modify any file in the project root (especially `03_reconstruct_volume.py`, `05_evaluate.py`).
-- Use SLURM, multi-GPU, or distributed training. Single GPU only (`CUDA_VISIBLE_DEVICES=0` if needed).
+- multi-GPU, or distributed training. Single GPU only (`CUDA_VISIBLE_DEVICES=0` if needed).
 - Use JAX or ZEA in `pipeline_pixart/` — this folder is pure PyTorch.
 
 ## Success criterion

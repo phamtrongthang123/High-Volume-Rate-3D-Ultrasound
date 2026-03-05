@@ -10,14 +10,80 @@ all operations differentiable so torch.autograd.grad() works in the
 reconstruction loop.
 """
 
+import json
 import math
+import os
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from diffusers import AutoencoderKL, DDPMScheduler, DPMSolverMultistepScheduler, Transformer2DModel
-from peft import PeftModel
 from transformers import T5EncoderModel, T5Tokenizer
+
+
+def _merge_lora_into_transformer(transformer, lora_path):
+    """Directly merge LoRA weights into transformer parameters (no PEFT dependency).
+
+    Reads adapter_config.json for lora_alpha/r, loads adapter_model.safetensors,
+    and applies: W_merged = W_base + (alpha/r) * lora_B @ lora_A
+    """
+    from safetensors.torch import load_file
+
+    config_path = os.path.join(lora_path, "adapter_config.json")
+    with open(config_path) as f:
+        cfg = json.load(f)
+    lora_alpha = cfg.get("lora_alpha", 8)
+    r = cfg.get("r", 8)
+    scale = lora_alpha / r
+
+    weights_path = os.path.join(lora_path, "adapter_model.safetensors")
+    lora_state = load_file(weights_path, device="cpu")
+
+    # Build dict: module_path -> {lora_A, lora_B}
+    lora_modules = {}
+    for key, tensor in lora_state.items():
+        # Key format: "base_model.model.MODULE_PATH.lora_{A,B}.weight"
+        if ".lora_A.weight" in key:
+            module = key.replace("base_model.model.", "").replace(".lora_A.weight", "")
+            lora_modules.setdefault(module, {})["lora_A"] = tensor
+        elif ".lora_B.weight" in key:
+            module = key.replace("base_model.model.", "").replace(".lora_B.weight", "")
+            lora_modules.setdefault(module, {})["lora_B"] = tensor
+
+    state_dict = transformer.state_dict()
+    merged = 0
+    skipped = 0
+    for module_path, ab in lora_modules.items():
+        param_key = module_path + ".weight"
+        if param_key not in state_dict:
+            skipped += 1
+            continue
+        if "lora_A" not in ab or "lora_B" not in ab:
+            skipped += 1
+            continue
+        base_w = state_dict[param_key]
+        lora_A = ab["lora_A"].float()  # (r, in) or (in, r) for fan_in_fan_out
+        lora_B = ab["lora_B"].float()  # (out, r) or (r, out) for fan_in_fan_out
+        # Flatten to 2D if conv weights
+        orig_shape = base_w.shape
+        lora_A_2d = lora_A.view(lora_A.shape[0], -1)
+        lora_B_2d = lora_B.view(lora_B.shape[0], -1)
+        # lora_B_2d: (out, r), lora_A_2d: (r, in)
+        # Ensure dimensions match for matmul
+        if lora_B_2d.shape[1] != lora_A_2d.shape[0]:
+            # Try transposing lora_A
+            lora_A_2d = lora_A_2d.T  # (in, r) → (r, in)
+            if lora_B_2d.shape[1] != lora_A_2d.shape[0]:
+                skipped += 1
+                continue
+        delta_2d = scale * (lora_B_2d @ lora_A_2d)  # (out, in)
+        delta = delta_2d.view(orig_shape)
+        state_dict[param_key] = base_w.float() + delta
+        merged += 1
+
+    print(f"  LoRA merged: {merged} modules, skipped {skipped}")
+    transformer.load_state_dict(state_dict)
+    return transformer
 
 
 def load_finetuned_vae_decoder(vae, path):
@@ -64,9 +130,7 @@ class PixArtDiffusionModel:
             pretrained_path, subfolder="transformer", torch_dtype=self.weight_dtype,
         )
         if lora_path is not None:
-            self.transformer = PeftModel.from_pretrained(
-                self.transformer, lora_path,
-            )
+            self.transformer = _merge_lora_into_transformer(self.transformer, lora_path)
         self.transformer.requires_grad_(False)
         self.transformer.to(self.device)
         self.transformer.eval()
@@ -384,10 +448,50 @@ class PixArtLatentDiffusionModel:
 
     def __init__(self, pretrained_path, lora_path=None, device="cuda",
                  vae_decoder_path=None):
+        import gc
         self.device = torch.device(device)
-        self.weight_dtype = torch.bfloat16
+        # V100 GPUs don't support bfloat16 natively (extreme slowdown in software emulation).
+        # Use float16 on V100, bfloat16 on A100/A6000/newer GPUs.
+        if torch.cuda.is_available():
+            cc = torch.cuda.get_device_capability(self.device)
+            self.weight_dtype = torch.bfloat16 if cc[0] >= 8 else torch.float16
+            print(f"GPU compute capability {cc}, using {self.weight_dtype}")
+        else:
+            self.weight_dtype = torch.float32
 
-        # Load VAE
+        # Step 1: Load T5 text encoder on GPU, encode prompt, then free GPU memory.
+        # T5-XXL is ~22GB in bf16 — too large to share GPU with the transformer.
+        # By encoding first and deleting, we keep peak GPU usage low.
+        self.tokenizer = T5Tokenizer.from_pretrained(
+            pretrained_path, subfolder="tokenizer",
+        )
+        print("Loading T5 text encoder on GPU for prompt encoding...")
+        _text_encoder = T5EncoderModel.from_pretrained(
+            pretrained_path, subfolder="text_encoder", torch_dtype=self.weight_dtype,
+        ).to(self.device)
+        _text_encoder.requires_grad_(False)
+        _text_encoder.eval()
+
+        print("Encoding prompt...")
+        _inputs = self.tokenizer(
+            "a cardiac ultrasound b-plane image",
+            max_length=120, padding="max_length", truncation=True, return_tensors="pt",
+        )
+        with torch.no_grad():
+            _embeds = _text_encoder(
+                _inputs.input_ids.to(self.device),
+                _inputs.attention_mask.to(self.device),
+            )[0]
+        self.prompt_embeds = _embeds  # keep on GPU
+        self.prompt_attention_mask = _inputs.attention_mask.to(self.device)
+
+        # Free T5 from GPU
+        del _text_encoder, _embeds, _inputs
+        gc.collect()
+        torch.cuda.empty_cache()
+        print("T5 text encoder freed from GPU.")
+
+        # Step 2: Load VAE and Transformer on GPU
         self.vae = AutoencoderKL.from_pretrained(
             pretrained_path, subfolder="vae", torch_dtype=self.weight_dtype,
         )
@@ -396,39 +500,20 @@ class PixArtLatentDiffusionModel:
         self.vae.requires_grad_(False)
         self.vae.to(self.device)
 
-        # Load Transformer (with optional LoRA)
         self.transformer = Transformer2DModel.from_pretrained(
             pretrained_path, subfolder="transformer", torch_dtype=self.weight_dtype,
         )
         if lora_path is not None:
-            self.transformer = PeftModel.from_pretrained(
-                self.transformer, lora_path,
-            )
+            self.transformer = _merge_lora_into_transformer(self.transformer, lora_path)
         self.transformer.requires_grad_(False)
         self.transformer.to(self.device)
         self.transformer.eval()
-
-        # Load tokenizer and text encoder
-        self.tokenizer = T5Tokenizer.from_pretrained(
-            pretrained_path, subfolder="tokenizer",
-        )
-        self.text_encoder = T5EncoderModel.from_pretrained(
-            pretrained_path, subfolder="text_encoder", torch_dtype=self.weight_dtype,
-        )
-        self.text_encoder.requires_grad_(False)
-        self.text_encoder.to(self.device)
-        self.text_encoder.eval()
 
         # Noise scheduler
         self.noise_scheduler = DDPMScheduler.from_pretrained(
             pretrained_path, subfolder="scheduler",
         )
         self.num_train_timesteps = self.noise_scheduler.config.num_train_timesteps
-
-        # Pre-encode prompt
-        self.prompt_embeds, self.prompt_attention_mask = self._encode_prompt(
-            "a cardiac ultrasound b-plane image"
-        )
 
         # VAE scaling
         self.vae_scale_factor = self.vae.config.scaling_factor
@@ -437,15 +522,7 @@ class PixArtLatentDiffusionModel:
         self.latent_shape = (4, 64, 64)
 
     def _encode_prompt(self, prompt):
-        inputs = self.tokenizer(
-            prompt, max_length=120, padding="max_length",
-            truncation=True, return_tensors="pt",
-        )
-        input_ids = inputs.input_ids.to(self.device)
-        attention_mask = inputs.attention_mask.to(self.device)
-        with torch.no_grad():
-            embeds = self.text_encoder(input_ids, attention_mask=attention_mask)[0]
-        return embeds, attention_mask
+        raise RuntimeError("_encode_prompt not used; prompt is pre-encoded at init")
 
     def encode_images(self, images_112):
         """Encode 112x112 grayscale images to VAE latent space.

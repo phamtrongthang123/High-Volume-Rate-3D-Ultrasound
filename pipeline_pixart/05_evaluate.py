@@ -9,6 +9,7 @@ on the missing (reconstructed) elevation planes only. Generates:
 Does NOT use JAX or ZEA — uses scikit-image and torchvision for metrics.
 """
 
+import argparse
 import json
 import os
 import sys
@@ -23,9 +24,15 @@ from skimage.metrics import structural_similarity, peak_signal_noise_ratio
 # --- Config ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
-OUTPUT_DIR = os.path.join(PROJECT_DIR, "outputs")
+_DEFAULT_OUTPUT_DIR = os.path.join(PROJECT_DIR, "outputs")
 ACCEL_RATE = 4
 N_DISPLAY = 4
+
+_parser = argparse.ArgumentParser(description="Evaluate PixArt reconstruction")
+_parser.add_argument("--output-dir", default=_DEFAULT_OUTPUT_DIR,
+                     help="Directory containing pseudo_volume.npy and reconstructed_volume_pixart.npy")
+_args = _parser.parse_args()
+OUTPUT_DIR = _args.output_dir
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

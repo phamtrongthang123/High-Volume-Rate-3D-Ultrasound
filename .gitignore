@@ -170,3 +170,9 @@ media
 EchoNet-Dynamic
 paper
 wandb
+
+# SLURM output files
+pipeline_pixart/slurm_*.out
+
+# Claude Code memory
+memory/
